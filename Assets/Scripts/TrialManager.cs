@@ -4,11 +4,18 @@ using System.IO;
 
 public class TrialManager : MonoBehaviour
 {
-    public Transform targetSphere;
+    public Transform targetA;
+    public Transform targetB;
+
+    private Transform currentTarget;
+    private Transform nextTarget;
+
     public TextMeshProUGUI trialText;
     public TextMeshProUGUI methodText;
     public TextMeshProUGUI resultText;
+
     public float trialTimeLimit = 3f;
+    
     public AudioSource audioSource;
     public AudioClip missSound;    
 
@@ -19,20 +26,38 @@ public class TrialManager : MonoBehaviour
     float A;
     float W;
     int dir;
+    
     bool trialEnded = false;
-
     int currentTrial = 0;
     int totalTrials = 32;
     float startTime;
-    string path = Application.dataPath + "/YourName_Outputfile.csv";
-    public bool usePinch;
 
+    string path = Application.dataPath + "/YourName_Outputfile.csv";
+    
+    public bool usePinch;
     public bool useAudioFeedback;
+    public bool useSnapAssistance;
+
+    [Header("Snap Assistance")]
+    public float snapRadius = 0.50f;
+
+    int hitsThisTrial = 0;
+    int hitsPerTrial = 5;
 
     void Start()
     {
+        File.WriteAllText(path, "Trial,Hit,A,W,Direction,Method,Snap,MT,ID,Result\n");
+        SetupTargets();
         NextTrial();
-        File.WriteAllText(path, "Trial,A,W,Direction,Method,Feedback,MT,ID,Result\n");
+    }
+
+    void SetupTargets()
+    {
+        currentTarget = targetA;
+        nextTarget = targetB;
+        // Enable both colliders
+        targetA.gameObject.SetActive(true);
+        targetB.gameObject.SetActive(true);
     }
 
     public void NextTrial()
@@ -43,6 +68,8 @@ public class TrialManager : MonoBehaviour
             return;
         }
 
+        hitsThisTrial = 0;
+
         // Determine condition
         int dIndex = currentTrial % distances.Length;
         int sIndex = (currentTrial / distances.Length) % sizes.Length;
@@ -52,20 +79,28 @@ public class TrialManager : MonoBehaviour
         W = sizes[sIndex];
         dir = directions[dirIndex];
 
-        // Apply size
-        targetSphere.localScale = new Vector3(W, W, W);
+        float angle = dir * 20f;
 
         Transform cam = Camera.main.transform;
 
-        float angle = dir * 20f;
+        // Base forward direction
+        Vector3 forward = cam.forward;
 
-        Vector3 direction = Quaternion.AngleAxis(angle, cam.up) * cam.forward;
+        // Left/right offset direction
+        Vector3 right = cam.right;
 
-        direction = Quaternion.AngleAxis(Random.Range(-5f, 5f), cam.right) * direction;
+        // Distance from user
+        Vector3 center = cam.position + forward * A;
 
-        Vector3 offset = direction.normalized * A;
+        // Spread targets left/right (half amplitude each side)
+        float spread = A / 2f;
 
-        targetSphere.position = cam.position + offset;
+        currentTarget.position = center + right * spread;
+        nextTarget.position = center - right * spread;
+
+        //Apply size to both targets
+        currentTarget.localScale = new Vector3(W, W, W);
+        nextTarget.localScale = new Vector3(W, W, W);
 
         Debug.Log($"Trial {currentTrial + 1}: A={A}, W={W}, Dir={dir}");
 
@@ -73,29 +108,73 @@ public class TrialManager : MonoBehaviour
 
         trialText.text = "Trial " + (currentTrial + 1);
 
-        int conditionBlock = currentTrial / (totalTrials / 4);
-        // 4 blocks:
-        // 0 = Touch + Visual
-        // 1 = Touch + Audio
-        // 2 = Pinch + Visual
-        // 3 = Pinch + Audio
-        usePinch = (conditionBlock >= 2);
-        useAudioFeedback = (conditionBlock % 2 == 1);
+        int condition = currentTrial % 4;
 
-        methodText.text = (usePinch ? "Pinch" : "Touch") + " | " + (useAudioFeedback ? "Audio+Visual" : "Visual");
+        switch (condition)
+        {
+            case 0:
+                usePinch = false;
+                useSnapAssistance = false;
+                break;
+
+            case 1:
+                usePinch = false;
+                useSnapAssistance = true;
+                break;
+
+            case 2:
+                usePinch = true;
+                useSnapAssistance = false;
+                break;
+
+            case 3:
+                usePinch = true;
+                useSnapAssistance = true;
+                break;
+        }
+
+        useAudioFeedback = true;
+
+        methodText.text = "Method: " + (usePinch ? "Pinch" : "Touch") + (useSnapAssistance ? " + Assistance" : "");
         resultText.text = "";
 
-        TargetObject target = targetSphere.GetComponent<TargetObject>();
-        target.enabled = true;
-        target.ResetSelection();
-        target.ForceClearHover();
+        // Reset both targets
+        ResetTarget(currentTarget);
+        ResetTarget(nextTarget);
+        
+        currentTarget.GetComponent<TargetObject>().SetActiveState(true);   // active
+        nextTarget.GetComponent<TargetObject>().SetActiveState(false);     // inactive
+                
+        Renderer currentRend = currentTarget.GetComponent<Renderer>();
+        Renderer nextRend = nextTarget.GetComponent<Renderer>();
 
         trialEnded = false;
     }
 
-    public void RegisterHit()
+    public Transform GetCurrentTarget()
     {
-        if (trialEnded) return;   // Prevent double hits
+        return currentTarget;
+    }
+
+    void ResetTarget(Transform t)
+    {
+        TargetObject obj = t.GetComponent<TargetObject>();
+        obj.enabled = true;
+        obj.ResetSelection();
+        obj.ForceClearHover();
+    }
+
+    public void RegisterHit(Transform hitTarget)
+    {
+        // Prevent double hits
+        if (trialEnded) return;
+
+        if (hitTarget != currentTarget)
+        {
+            File.AppendAllText(path,
+                $"{currentTrial},{hitsThisTrial},{A},{W},{dir},{(usePinch ? "Pinch" : "Touch")},0,0,ERROR\n");
+            return;
+        }   
 
         trialEnded = true;
 
@@ -104,14 +183,46 @@ public class TrialManager : MonoBehaviour
 
         resultText.text = "HIT";
         resultText.color = Color.green;
-        Invoke(nameof(NextTrial), 0.5f);
 
         float ID = Mathf.Log((A / W) + 1, 2);
+        
+        hitsThisTrial++;
 
         File.AppendAllText(path,
-            $"{currentTrial},{A},{W},{dir},{(usePinch ? "Pinch" : "Touch")},{(useAudioFeedback ? "Audio" : "Visual")},{MT},{ID},HIT\n");
+            //$"{currentTrial},{hitsThisTrial},{A},{W},{dir},{(usePinch ? "Pinch" : "Touch")},{MT},{ID},HIT\n");
+            $"{currentTrial},{hitsThisTrial},{A},{W},{dir}," +
+            $"{(usePinch ? "Pinch" : "Touch")}," +
+            $"{(useSnapAssistance ? "Snap" : "Normal")}," +
+            $"{MT},{ID},HIT\n");
+      
+        // Switch targets
+        Transform temp = currentTarget;
+        currentTarget = nextTarget;
+        nextTarget = temp;
 
-        currentTrial++;
+        // Reset both targets
+        currentTarget.GetComponent<TargetObject>().ResetSelection();
+        nextTarget.GetComponent<TargetObject>().ResetSelection();
+
+        // Update visuals
+        currentTarget.GetComponent<TargetObject>().SetActiveState(true);   // active
+        nextTarget.GetComponent<TargetObject>().SetActiveState(false);     // inactive 
+
+        // Check if trial is done
+        if (hitsThisTrial >= hitsPerTrial)
+        {
+            currentTrial++;
+            Invoke(nameof(NextTrial), 0.5f);
+        }
+        else
+        {
+            // Continue same trial
+            trialEnded = false;
+            startTime = Time.time;
+        }       
+
+        Renderer currentRend = currentTarget.GetComponent<Renderer>();
+        Renderer nextRend = nextTarget.GetComponent<Renderer>();
     }
 
     void Update()
@@ -140,7 +251,11 @@ public class TrialManager : MonoBehaviour
             float ID = Mathf.Log((A / W) + 1, 2);
 
             File.AppendAllText(path,
-                $"{currentTrial},{A},{W},{dir},{(usePinch ? "Pinch" : "Touch")},{MT},{ID},MISS\n");
+                //$"{currentTrial},{hitsThisTrial},{A},{W},{dir},{(usePinch ? "Pinch" : "Touch")},{MT},{ID},MISS\n");
+                $"{currentTrial},{hitsThisTrial},{A},{W},{dir}," +
+                $"{(usePinch ? "Pinch" : "Touch")}," +
+                $"{(useSnapAssistance ? "Snap" : "Normal")}," +
+                $"{MT},{ID},MISS\n");
 
             currentTrial++;
             Invoke(nameof(NextTrial), 0.5f);
